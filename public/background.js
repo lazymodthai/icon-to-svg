@@ -29,6 +29,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // Content script captured a data URL directly (same-origin image)
     storeAndOpen(msg.dataUrl)
     sendResponse({ ok: true })
+  } else if (msg.type === 'AREA_SELECTED') {
+    // Content script drew a rectangle — screenshot the tab and crop
+    const tabId = _sender.tab?.id
+    const windowId = _sender.tab?.windowId
+    if (!tabId || !windowId) return
+
+    captureAndCrop(windowId, msg.rect)
+      .then((dataUrl) => storeAndOpen(dataUrl))
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => {
+        console.error('[icon2svg] Area capture failed:', err)
+        sendResponse({ ok: false, error: err.message })
+      })
+    return true
   } else if (msg.type === 'IMAGE_URL_CAPTURED') {
     // Content script couldn't read the image (CORS) — fetch via background
     fetchAsDataUrl(msg.url)
@@ -43,6 +57,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 })
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+async function captureAndCrop(windowId, rect) {
+  // Capture the visible tab as a PNG data URL
+  const screenshotUrl = await chrome.tabs.captureVisibleTab(windowId, {
+    format: 'png',
+  })
+
+  // Crop the screenshot to the drawn rectangle using OffscreenCanvas
+  const resp = await fetch(screenshotUrl)
+  const blob = await resp.blob()
+  const bitmap = await createImageBitmap(blob, rect.x, rect.y, rect.w, rect.h)
+
+  const canvas = new OffscreenCanvas(rect.w, rect.h)
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(bitmap, 0, 0)
+  bitmap.close()
+
+  const croppedBlob = await canvas.convertToBlob({ type: 'image/png' })
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result)
+    reader.onerror = () => reject(new Error('FileReader failed'))
+    reader.readAsDataURL(croppedBlob)
+  })
+}
 
 async function fetchAsDataUrl(url) {
   const resp = await fetch(url)

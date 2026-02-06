@@ -15,6 +15,19 @@ document.getElementById('pick').addEventListener('click', async () => {
   window.close()
 })
 
+document.getElementById('draw').addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  if (!tab || !tab.id) return
+
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['content.js'],
+  })
+
+  chrome.tabs.sendMessage(tab.id, { type: 'START_DRAW' })
+  window.close()
+})
+
 document.getElementById('open').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('index.html') })
   window.close()

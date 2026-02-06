@@ -35,6 +35,30 @@ function loadImageData(dataUrl) {
   })
 }
 
+function cropImageDataUrl(dataUrl, rect) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const c = document.createElement('canvas')
+      c.width = rect.w
+      c.height = rect.h
+      const ctx = c.getContext('2d')
+      ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h)
+      resolve(ctx.getImageData(0, 0, rect.w, rect.h))
+    }
+    img.src = dataUrl
+  })
+}
+
+function canvasToDataUrl(imageData) {
+  const c = document.createElement('canvas')
+  c.width = imageData.width
+  c.height = imageData.height
+  const ctx = c.getContext('2d')
+  ctx.putImageData(imageData, 0, 0)
+  return c.toDataURL('image/png')
+}
+
 function postProcess(svgStr) {
   let s = optimizeSvg(svgStr)
   s = simplifyPaths(s)
@@ -90,6 +114,7 @@ export default function App() {
   )
   const [recolorMaps, setRecolorMaps] = useState({})
   const [dragOver, setDragOver] = useState(false)
+  const [cropTarget, setCropTarget] = useState(null) // file id being cropped
   const inputRef = useRef(null)
   const workerRef = useRef(null)
   const debounceRef = useRef(null)
@@ -358,6 +383,52 @@ export default function App() {
     }))
   }
 
+  // ── crop handler ──────────────────────────────────────────────────
+
+  const handleCropConfirm = useCallback(
+    async (fileId, rect) => {
+      // rect = { x, y, w, h } in original image pixel coords
+      const file = files.find((f) => f.id === fileId)
+      if (!file) return
+
+      const croppedData = await cropImageDataUrl(file.originalSrc, rect)
+      const croppedSrc = canvasToDataUrl(croppedData)
+
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === fileId
+            ? { ...f, originalSrc: croppedSrc, imageData: croppedData, svgString: null, converting: true, colors: [] }
+            : f,
+        ),
+      )
+      setRecolorMaps((m) => {
+        const next = { ...m }
+        delete next[fileId]
+        return next
+      })
+      setCropTarget(null)
+
+      workerRef.current?.postMessage({
+        type: 'convert',
+        id: fileId,
+        imageData: {
+          data: croppedData.data,
+          width: croppedData.width,
+          height: croppedData.height,
+        },
+        options: {
+          numberofcolors: numColors,
+          pathomit: 8,
+          ltres: smoothness,
+          qtres: smoothness,
+          scale: 1,
+          strokewidth: 0,
+        },
+      })
+    },
+    [files, numColors, smoothness],
+  )
+
   // ── computed ───────────────────────────────────────────────────────
 
   const hasConverted = files.some((f) => f.svgString)
@@ -498,6 +569,13 @@ export default function App() {
                     )}
                   </div>
 
+                  {/* crop button (always visible) */}
+                  {!displaySvg && (
+                    <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 4 }}>
+                      <button onClick={() => setCropTarget(f.id)} style={smallBtn(t)}>Draw area</button>
+                    </div>
+                  )}
+
                   {/* colours + actions */}
                   {displaySvg && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 140 }}>
@@ -522,6 +600,7 @@ export default function App() {
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
                         <button onClick={() => downloadSvg(f)} style={smallBtn(t)}>Download</button>
                         <button onClick={() => downloadSvg(f, true)} style={smallBtn(t)}>Figma</button>
+                        <button onClick={() => setCropTarget(f.id)} style={smallBtn(t)}>Draw area</button>
                       </div>
                     </div>
                   )}
@@ -531,6 +610,20 @@ export default function App() {
           })}
         </div>
       </div>
+
+      {/* crop modal */}
+      {cropTarget && (() => {
+        const file = files.find((f) => f.id === cropTarget)
+        if (!file) return null
+        return (
+          <CropModal
+            src={file.originalSrc}
+            theme={t}
+            onConfirm={(rect) => handleCropConfirm(cropTarget, rect)}
+            onCancel={() => setCropTarget(null)}
+          />
+        )
+      })()}
     </div>
   )
 }
@@ -543,6 +636,159 @@ function Spinner() {
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <circle cx="14" cy="14" r="11" fill="none" stroke="#4a90d9" strokeWidth="3" strokeDasharray="50 20" />
     </svg>
+  )
+}
+
+// ── crop modal ───────────────────────────────────────────────────────
+
+function CropModal({ src, theme: t, onConfirm, onCancel }) {
+  const canvasRef = useRef(null)
+  const imgRef = useRef(null)
+  const [drawing, setDrawing] = useState(false)
+  const [start, setStart] = useState(null)
+  const [rect, setRect] = useState(null)
+  const [imgLoaded, setImgLoaded] = useState(false)
+  const [scale, setScale] = useState(1)
+
+  // Load image to get natural dimensions
+  useEffect(() => {
+    const img = new Image()
+    img.onload = () => {
+      imgRef.current = img
+
+      // Fit image into modal (max 80vw x 70vh)
+      const maxW = window.innerWidth * 0.8
+      const maxH = window.innerHeight * 0.7
+      const s = Math.min(1, maxW / img.width, maxH / img.height)
+      setScale(s)
+      setImgLoaded(true)
+    }
+    img.src = src
+  }, [src])
+
+  // Draw canvas whenever rect changes
+  useEffect(() => {
+    if (!imgLoaded || !canvasRef.current || !imgRef.current) return
+    const canvas = canvasRef.current
+    const img = imgRef.current
+    const ctx = canvas.getContext('2d')
+
+    canvas.width = Math.round(img.width * scale)
+    canvas.height = Math.round(img.height * scale)
+
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+
+    if (rect) {
+      // Dim outside the selection
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+      // Clear the selected region to show the image
+      ctx.clearRect(rect.x, rect.y, rect.w, rect.h)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+
+      // Re-dim outside (using clip)
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(0, 0, canvas.width, canvas.height)
+      ctx.rect(rect.x, rect.y, rect.w, rect.h)
+      ctx.clip('evenodd')
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.restore()
+
+      // Selection border
+      ctx.strokeStyle = '#6ab0f3'
+      ctx.lineWidth = 2
+      ctx.setLineDash([6, 3])
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h)
+      ctx.setLineDash([])
+    }
+  }, [imgLoaded, rect, scale])
+
+  const onMouseDown = (e) => {
+    const r = canvasRef.current.getBoundingClientRect()
+    const x = e.clientX - r.left
+    const y = e.clientY - r.top
+    setStart({ x, y })
+    setRect(null)
+    setDrawing(true)
+  }
+
+  const onMouseMove = (e) => {
+    if (!drawing || !start) return
+    const r = canvasRef.current.getBoundingClientRect()
+    const cx = Math.max(0, Math.min(e.clientX - r.left, r.width))
+    const cy = Math.max(0, Math.min(e.clientY - r.top, r.height))
+    setRect({
+      x: Math.min(start.x, cx),
+      y: Math.min(start.y, cy),
+      w: Math.abs(cx - start.x),
+      h: Math.abs(cy - start.y),
+    })
+  }
+
+  const onMouseUp = () => {
+    setDrawing(false)
+  }
+
+  const handleConfirm = () => {
+    if (!rect || rect.w < 2 || rect.h < 2) return
+    // Convert display coords back to original image coords
+    onConfirm({
+      x: Math.round(rect.x / scale),
+      y: Math.round(rect.y / scale),
+      w: Math.round(rect.w / scale),
+      h: Math.round(rect.h / scale),
+    })
+  }
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Enter') handleConfirm()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        background: 'rgba(0,0,0,0.7)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      }}
+      onMouseMove={onMouseMove}
+      onMouseUp={onMouseUp}
+    >
+      <div style={{ marginBottom: 12, fontSize: 14, color: '#e0e0e0' }}>
+        Draw a rectangle around the area to convert. Press Esc to cancel.
+      </div>
+      {imgLoaded && (
+        <canvas
+          ref={canvasRef}
+          onMouseDown={onMouseDown}
+          style={{ cursor: 'crosshair', borderRadius: 6, border: `2px solid ${t.border}` }}
+        />
+      )}
+      <div style={{ marginTop: 14, display: 'flex', gap: 10 }}>
+        <button
+          onClick={handleConfirm}
+          disabled={!rect || rect.w < 2 || rect.h < 2}
+          style={{
+            ...smallBtn(t),
+            padding: '8px 24px', fontSize: 14,
+            opacity: (!rect || rect.w < 2) ? 0.4 : 1,
+          }}
+        >
+          Crop &amp; Convert
+        </button>
+        <button onClick={onCancel} style={{ ...smallBtn(t), padding: '8px 24px', fontSize: 14, borderColor: '#e55', color: '#e55' }}>
+          Cancel
+        </button>
+      </div>
+    </div>
   )
 }
 
