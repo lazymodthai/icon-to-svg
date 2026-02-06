@@ -59,6 +59,89 @@ function canvasToDataUrl(imageData) {
   return c.toDataURL('image/png')
 }
 
+function removeBackground(imageData, tolerance = 30) {
+  const { width, height } = imageData
+  const data = new Uint8ClampedArray(imageData.data)
+
+  // Sample the 4 corner pixels to determine background color
+  const getPixel = (x, y) => {
+    const i = (y * width + x) * 4
+    return [data[i], data[i + 1], data[i + 2], data[i + 3]]
+  }
+
+  const corners = [
+    getPixel(0, 0),
+    getPixel(width - 1, 0),
+    getPixel(0, height - 1),
+    getPixel(width - 1, height - 1),
+  ]
+
+  // Use the most common corner color as the background
+  const colorKey = (c) => `${c[0]},${c[1]},${c[2]}`
+  const counts = {}
+  for (const c of corners) {
+    const k = colorKey(c)
+    counts[k] = (counts[k] || 0) + 1
+  }
+  let bgColor = corners[0]
+  let maxCount = 0
+  for (const c of corners) {
+    const k = colorKey(c)
+    if (counts[k] > maxCount) {
+      maxCount = counts[k]
+      bgColor = c
+    }
+  }
+
+  const matches = (x, y) => {
+    const i = (y * width + x) * 4
+    return (
+      Math.abs(data[i] - bgColor[0]) <= tolerance &&
+      Math.abs(data[i + 1] - bgColor[1]) <= tolerance &&
+      Math.abs(data[i + 2] - bgColor[2]) <= tolerance &&
+      data[i + 3] > 0
+    )
+  }
+
+  // Flood-fill from all 4 corners
+  const visited = new Uint8Array(width * height)
+  const queue = []
+  const startPoints = [
+    [0, 0],
+    [width - 1, 0],
+    [0, height - 1],
+    [width - 1, height - 1],
+  ]
+
+  for (const [sx, sy] of startPoints) {
+    if (visited[sy * width + sx] || !matches(sx, sy)) continue
+    queue.push(sx, sy)
+    visited[sy * width + sx] = 1
+  }
+
+  while (queue.length > 0) {
+    const y = queue.pop()
+    const x = queue.pop()
+    // Make transparent
+    const i = (y * width + x) * 4
+    data[i + 3] = 0
+
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+      const ni = ny * width + nx
+      if (visited[ni]) continue
+      visited[ni] = 1
+      if (matches(nx, ny)) {
+        queue.push(nx, ny)
+      }
+    }
+  }
+
+  return new ImageData(data, width, height)
+}
+
 function postProcess(svgStr) {
   let s = optimizeSvg(svgStr)
   s = simplifyPaths(s)
@@ -429,6 +512,50 @@ export default function App() {
     [files, numColors, smoothness],
   )
 
+  // ── remove background handler ─────────────────────────────────────
+
+  const handleRemoveBg = useCallback(
+    (fileId) => {
+      const file = files.find((f) => f.id === fileId)
+      if (!file?.imageData) return
+
+      const cleaned = removeBackground(file.imageData)
+      const cleanedSrc = canvasToDataUrl(cleaned)
+
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === fileId
+            ? { ...f, originalSrc: cleanedSrc, imageData: cleaned, svgString: null, converting: true, colors: [] }
+            : f,
+        ),
+      )
+      setRecolorMaps((m) => {
+        const next = { ...m }
+        delete next[fileId]
+        return next
+      })
+
+      workerRef.current?.postMessage({
+        type: 'convert',
+        id: fileId,
+        imageData: {
+          data: cleaned.data,
+          width: cleaned.width,
+          height: cleaned.height,
+        },
+        options: {
+          numberofcolors: numColors,
+          pathomit: 8,
+          ltres: smoothness,
+          qtres: smoothness,
+          scale: 1,
+          strokewidth: 0,
+        },
+      })
+    },
+    [files, numColors, smoothness],
+  )
+
   // ── computed ───────────────────────────────────────────────────────
 
   const hasConverted = files.some((f) => f.svgString)
@@ -569,10 +696,11 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* crop button (always visible) */}
+                  {/* actions when not yet converted */}
                   {!displaySvg && (
-                    <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 4 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, paddingBottom: 4 }}>
                       <button onClick={() => setCropTarget(f.id)} style={smallBtn(t)}>Draw area</button>
+                      <button onClick={() => handleRemoveBg(f.id)} style={smallBtn(t)}>Remove BG</button>
                     </div>
                   )}
 
@@ -601,6 +729,7 @@ export default function App() {
                         <button onClick={() => downloadSvg(f)} style={smallBtn(t)}>Download</button>
                         <button onClick={() => downloadSvg(f, true)} style={smallBtn(t)}>Figma</button>
                         <button onClick={() => setCropTarget(f.id)} style={smallBtn(t)}>Draw area</button>
+                        <button onClick={() => handleRemoveBg(f.id)} style={smallBtn(t)}>Remove BG</button>
                       </div>
                     </div>
                   )}
