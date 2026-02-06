@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Flat Icon to SVG Converter",
+  "description": "Convert flat-color PNG/JPG icons into multi-path SVG. Pick images from any webpage or upload directly.",
+  "version": "1.0.0",
+  "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {}
+}

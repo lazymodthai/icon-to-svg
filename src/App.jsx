@@ -10,7 +10,10 @@ import {
 } from './svgUtils'
 
 const DEFAULT_COLORS = 6
+const DEFAULT_SMOOTHNESS = 1
 const TARGET_SIZE = 512
+const isExtension =
+  typeof chrome !== 'undefined' && !!chrome.storage?.local
 
 let _id = 0
 const uid = () => `f${++_id}`
@@ -81,6 +84,7 @@ const dark = {
 export default function App() {
   const [files, setFiles] = useState([])
   const [numColors, setNumColors] = useState(DEFAULT_COLORS)
+  const [smoothness, setSmoothness] = useState(DEFAULT_SMOOTHNESS)
   const [darkMode, setDarkMode] = useState(
     () => localStorage.getItem('icon2svg_dark') === '1',
   )
@@ -134,6 +138,66 @@ export default function App() {
     localStorage.setItem('icon2svg_dark', darkMode ? '1' : '0')
   }, [darkMode])
 
+  // ── import a data URL (from extension pick / context menu) ────────
+
+  const importDataUrl = useCallback(
+    async (dataUrl, name = 'picked-image') => {
+      const imageData = await loadImageData(dataUrl)
+      const entry = {
+        id: uid(),
+        name,
+        originalSrc: dataUrl,
+        imageData,
+        svgString: null,
+        converting: true,
+        colors: [],
+      }
+      setFiles((prev) => [...prev, entry])
+      workerRef.current?.postMessage({
+        type: 'convert',
+        id: entry.id,
+        imageData: {
+          data: imageData.data,
+          width: imageData.width,
+          height: imageData.height,
+        },
+        options: {
+          numberofcolors: numColors,
+          pathomit: 8,
+          ltres: smoothness,
+          qtres: smoothness,
+          scale: 1,
+          strokewidth: 0,
+        },
+      })
+    },
+    [numColors, smoothness],
+  )
+
+  // ── chrome extension: pending image from storage ──────────────────
+
+  useEffect(() => {
+    if (!isExtension) return
+
+    // Check for pending image on mount
+    chrome.storage.local.get('pendingImage', (result) => {
+      if (result.pendingImage?.dataUrl) {
+        importDataUrl(result.pendingImage.dataUrl)
+        chrome.storage.local.remove('pendingImage')
+      }
+    })
+
+    // Listen for new pending images while tab is open
+    const onChanged = (changes) => {
+      if (changes.pendingImage?.newValue?.dataUrl) {
+        importDataUrl(changes.pendingImage.newValue.dataUrl)
+        chrome.storage.local.remove('pendingImage')
+      }
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+  }, [importDataUrl])
+
   // ── convert a single file via worker ───────────────────────────────
 
   const convertFile = useCallback(
@@ -153,14 +217,14 @@ export default function App() {
         options: {
           numberofcolors: numColors,
           pathomit: 8,
-          ltres: 1,
-          qtres: 1,
+          ltres: smoothness,
+          qtres: smoothness,
           scale: 1,
           strokewidth: 0,
         },
       })
     },
-    [numColors],
+    [numColors, smoothness],
   )
 
   // ── reconvert all on slider change (debounced) ─────────────────────
@@ -175,7 +239,7 @@ export default function App() {
     }, 300)
     return () => clearTimeout(debounceRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [numColors])
+  }, [numColors, smoothness])
 
   // ── file ingestion ─────────────────────────────────────────────────
 
@@ -214,15 +278,15 @@ export default function App() {
           options: {
             numberofcolors: numColors,
             pathomit: 8,
-            ltres: 1,
-            qtres: 1,
+            ltres: smoothness,
+            qtres: smoothness,
             scale: 1,
             strokewidth: 0,
           },
         })
       })
     },
-    [numColors],
+    [numColors, smoothness],
   )
 
   // ── event handlers ─────────────────────────────────────────────────
@@ -246,6 +310,7 @@ export default function App() {
     setFiles([])
     setRecolorMaps({})
     setNumColors(DEFAULT_COLORS)
+    setSmoothness(DEFAULT_SMOOTHNESS)
     if (inputRef.current) inputRef.current.value = ''
   }
 
@@ -350,6 +415,26 @@ export default function App() {
               onChange={(e) => setNumColors(+e.target.value)}
               style={{ width: '100%', accentColor: t.accent }}
             />
+          </div>
+
+          {/* smoothness slider */}
+          <div style={{ background: t.surface, borderRadius: 10, padding: 16 }}>
+            <label style={{ fontSize: 13, color: t.textSec, display: 'block', marginBottom: 6 }}>
+              Edge smoothness: <strong style={{ color: t.text }}>{smoothness}</strong>
+            </label>
+            <input
+              type="range"
+              min={0.5}
+              max={10}
+              step={0.5}
+              value={smoothness}
+              onChange={(e) => setSmoothness(+e.target.value)}
+              style={{ width: '100%', accentColor: t.accent }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: t.textSec, marginTop: 4 }}>
+              <span>Sharp</span>
+              <span>Smooth</span>
+            </div>
           </div>
 
           {/* buttons */}
